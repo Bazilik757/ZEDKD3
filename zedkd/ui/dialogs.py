@@ -29,6 +29,9 @@ class RowEditorDialog(tk.Toplevel):
         canvas.pack(side="left", fill="both", expand=True)
         scroll_y.pack(side="right", fill="y")
 
+        self._canvas = canvas
+        self._bind_scroll_events()
+
         self.vars: Dict[str, tk.StringVar] = {}
         for idx, column in enumerate(columns):
             ttk.Label(frame, text=column).grid(row=idx, column=0, sticky="w", padx=5, pady=4)
@@ -44,6 +47,38 @@ class RowEditorDialog(tk.Toplevel):
 
         ttk.Button(btns, text="ОК", command=self.on_ok).pack(side="right", padx=6)
         ttk.Button(btns, text="Отмена", command=self.on_cancel).pack(side="right")
+
+    def _bind_scroll_events(self) -> None:
+        self._canvas.bind("<Enter>", self._enable_wheel_scroll)
+        self._canvas.bind("<Leave>", self._disable_wheel_scroll)
+        self._canvas.bind("<ButtonPress-2>", self._start_drag_scroll)
+        self._canvas.bind("<B2-Motion>", self._drag_scroll)
+
+    def _enable_wheel_scroll(self, _event) -> None:
+        self.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.bind_all("<Button-4>", self._on_mousewheel)
+        self.bind_all("<Button-5>", self._on_mousewheel)
+
+    def _disable_wheel_scroll(self, _event) -> None:
+        self.unbind_all("<MouseWheel>")
+        self.unbind_all("<Button-4>")
+        self.unbind_all("<Button-5>")
+
+    def _start_drag_scroll(self, event) -> None:
+        self._canvas.scan_mark(event.x, event.y)
+
+    def _drag_scroll(self, event) -> None:
+        self._canvas.scan_dragto(event.x, event.y, gain=1)
+
+    def _on_mousewheel(self, event) -> None:
+        if event.num == 4:
+            delta = -1
+        elif event.num == 5:
+            delta = 1
+        else:
+            delta = int(-1 * (event.delta / 120))
+
+        self._canvas.yview_scroll(delta, "units")
 
     def on_ok(self):
         self.result = {c: v.get().strip() for c, v in self.vars.items()}
