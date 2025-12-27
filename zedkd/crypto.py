@@ -62,10 +62,23 @@ def sign_document(username: str, file_path: str, doc_id: Optional[str] = None) -
         data = f.read()
 
     doc_hash = calc_doc_hash_bytes(data)
-    index_key = f"signature_index:{doc_hash}:{username}"
-    existing_sig = safe_load_data(index_key, None)
-    if existing_sig:
-        raise ValueError("Пользователь уже подписывал этот документ")
+
+    # Если у документа есть ID, проверяем привязанный индекс по doc_id, чтобы не зависеть
+    # от совпадений хэшей разных файлов.
+    if doc_id:
+        existing_sig = safe_load_data(f"signature_doc_index:{doc_id}", None)
+        if existing_sig:
+            sig_payload = safe_load_data(existing_sig, {})
+            # Если документ уже подписан (тем же или другим пользователем), блокируем повтор
+            # подписания, так как этап считается пройденным.
+            signer_name = sig_payload.get("username", "")
+            raise ValueError("Пользователь уже подписывал этот документ" if signer_name == username else "Документ уже подписан")
+        index_key = f"signature_index:{doc_id}:{username}"
+    else:
+        index_key = f"signature_index:{doc_hash}:{username}"
+        existing_sig = safe_load_data(index_key, None)
+        if existing_sig:
+            raise ValueError("Пользователь уже подписывал этот документ")
 
     private_key_bytes = bytes.fromhex(keys["private_key"])
     signature_raw = hashlib.sha256(bytes.fromhex(doc_hash) + private_key_bytes).hexdigest()

@@ -69,6 +69,11 @@ class ZEDKDGApp:
         }
         self.metric_meters: Dict[str, Meter] = {}
 
+        self.surface_bg = "#0f172a"
+
+        self.main_canvas: tk.Canvas | None = None
+        self._main_canvas_window: int | None = None
+
         self.style = tb.Style(theme="superhero")
         self._init_style()
 
@@ -88,7 +93,8 @@ class ZEDKDGApp:
     def _init_style(self):
         colors = getattr(self.style, "colors", None)
         accent = getattr(colors, "info", "#22d3ee")
-        surface = getattr(colors, "bg", "#0f172a")
+        surface = getattr(colors, "bg", self.surface_bg)
+        self.surface_bg = surface
         card = getattr(colors, "surface", "#0e162a")
         muted = getattr(colors, "muted", "#94a3b8")
         primary = getattr(colors, "primary", "#38bdf8")
@@ -213,8 +219,27 @@ class ZEDKDGApp:
     # -------------------------
 
     def build_ui(self):
-        shell = ttk.Frame(self.root, padding=16, style="Panel.TFrame")
-        shell.pack(fill="both", expand=True)
+        viewport = ttk.Frame(self.root, style="Panel.TFrame")
+        viewport.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(viewport, highlightthickness=0, background=self.surface_bg)
+        scroll_y = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll_y.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scroll_y.pack(side="right", fill="y")
+
+        shell = ttk.Frame(canvas, padding=16, style="Panel.TFrame")
+        window_id = canvas.create_window((0, 0), window=shell, anchor="nw")
+
+        shell.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind(
+            "<Configure>",
+            lambda e: canvas.itemconfigure(window_id, width=e.width),
+        )
+
+        self.main_canvas = canvas
+        self._main_canvas_window = window_id
+        self._bind_main_scroll()
 
         header = ttk.Frame(shell, style="Panel.TFrame")
         header.pack(fill="x")
@@ -291,8 +316,48 @@ class ZEDKDGApp:
 
         self.main_tabs.bind("<<NotebookTabChanged>>", self._sync_tab_selection)
 
-        status_bar = ttk.Label(shell, textvariable=self.status_var, anchor="w", relief="sunken", padding=(8, 6))
+        status_bar = ttk.Label(self.root, textvariable=self.status_var, anchor="w", relief="sunken", padding=(8, 6))
         status_bar.pack(fill="x", side="bottom", pady=(10, 0))
+
+    def _bind_main_scroll(self) -> None:
+        if not self.main_canvas:
+            return
+
+        self.main_canvas.bind("<Enter>", self._enable_main_wheel)
+        self.main_canvas.bind("<Leave>", self._disable_main_wheel)
+        self.main_canvas.bind("<ButtonPress-2>", self._start_main_drag)
+        self.main_canvas.bind("<B2-Motion>", self._drag_main_scroll)
+
+    def _enable_main_wheel(self, _event=None) -> None:
+        self.root.bind_all("<MouseWheel>", self._on_main_mousewheel)
+        self.root.bind_all("<Button-4>", self._on_main_mousewheel)
+        self.root.bind_all("<Button-5>", self._on_main_mousewheel)
+
+    def _disable_main_wheel(self, _event=None) -> None:
+        self.root.unbind_all("<MouseWheel>")
+        self.root.unbind_all("<Button-4>")
+        self.root.unbind_all("<Button-5>")
+
+    def _start_main_drag(self, event) -> None:
+        if self.main_canvas:
+            self.main_canvas.scan_mark(event.x, event.y)
+
+    def _drag_main_scroll(self, event) -> None:
+        if self.main_canvas:
+            self.main_canvas.scan_dragto(event.x, event.y, gain=1)
+
+    def _on_main_mousewheel(self, event) -> None:
+        if not self.main_canvas:
+            return
+
+        if event.num == 4:
+            delta = -1
+        elif event.num == 5:
+            delta = 1
+        else:
+            delta = int(-1 * (event.delta / 120))
+
+        self.main_canvas.yview_scroll(delta, "units")
 
     def switch_view(self, key: str):
         self.active_view.set(key)
