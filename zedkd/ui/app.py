@@ -1,19 +1,27 @@
 
 import os
+import secrets
 import shutil
 import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, messagebox, simpledialog, ttk
 import ttkbootstrap as tb
 from ttkbootstrap.widgets import Meter
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from ..crypto import (
     decrypt_file,
     encrypt_file,
+    encrypt_file_mgm,
+    decrypt_file_mgm,
+    dh_generate_keypair,
+    dh_derive_shared_secret,
     generate_keys,
     sign_document,
     verify_signature,
+    generate_imito,
+    elgamal_sign,
+    elgamal_verify,
 )
 from ..documents import (
     DOC_TYPES,
@@ -68,6 +76,9 @@ class ZEDKDGApp:
             "encrypted": tk.IntVar(value=0),
         }
         self.metric_meters: Dict[str, Meter] = {}
+
+        self._imito_cache: Dict[str, Tuple[bytes, str, str]] = {}
+        self._mgm_paths: Dict[str, str] = {}
 
         self.surface_bg = "#0f172a"
 
@@ -405,6 +416,11 @@ class ZEDKDGApp:
         crypto_card = ttk.LabelFrame(cards, text="Контроль", padding=10, style="Card.TLabelframe")
         crypto_card.pack(side="left", fill="x", expand=True)
         ttk.Button(crypto_card, text="Проверка целостности", command=self.check_integrity_button).pack(anchor="w", pady=2)
+        ttk.Button(crypto_card, text="Имитовставка: создать", command=self.generate_imito_now).pack(anchor="w", pady=2)
+        ttk.Button(crypto_card, text="Имитовставка: проверить", command=self.verify_imito_now).pack(anchor="w", pady=2)
+        ttk.Button(crypto_card, text="MGM шифрование", command=self.encrypt_mgm_now).pack(anchor="w", pady=2)
+        ttk.Button(crypto_card, text="MGM расшифровка", command=self.decrypt_mgm_now).pack(anchor="w", pady=2)
+        ttk.Button(crypto_card, text="DH / ElGamal проверка", command=self.demo_dh_elgamal).pack(anchor="w", pady=(2, 8))
         ttk.Button(crypto_card, text="Следующий этап", command=self.run_next_step, style="Primary.TButton").pack(anchor="w", pady=4)
         ttk.Button(crypto_card, text="Автопроход", command=self.run_all_steps, style="Secondary.TButton").pack(anchor="w", pady=4)
 
@@ -1066,6 +1082,135 @@ class ZEDKDGApp:
                 messagebox.showwarning("Целостность", "ВНИМАНИЕ: документ изменён (хэш не совпадает)!")
                 self.set_status("Целостность нарушена")
 
+            self.refresh_audit()
+        except Exception as e:
+            messagebox.showerror("Ошибка", str(e))
+
+    def generate_imito_now(self):
+        if not self.require_user():
+            return
+        d = self.get_doc()
+        if not d:
+            messagebox.showwarning("Нет документа", "Выберите документ.")
+            return
+        try:
+            with open(d.stored_path, "rb") as f:
+                data = f.read()
+            key = secrets.token_bytes(32)
+            imito = generate_imito(key, data)
+            doc_hash = calc_file_hash(d.stored_path)
+            self._imito_cache[d.doc_id] = (key, imito, doc_hash)
+            log_event(self.current_user, "imito_generate", "ok", doc_id=d.doc_id, extra={"imito": imito})
+            messagebox.showinfo("Имитовставка", f"Сформировано: {imito}\nКлюч и код сохранены для проверки")
+            self.set_status("Имитовставка создана")
+            self.refresh_audit()
+        except Exception as e:
+            messagebox.showerror("Ошибка", str(e))
+
+    def verify_imito_now(self):
+        d = self.get_doc()
+        if not d:
+            messagebox.showwarning("Нет документа", "Выберите документ.")
+            return
+        cache = self._imito_cache.get(d.doc_id)
+        if not cache:
+            messagebox.showwarning("Нет данных", "Сначала создайте имитовставку для выбранного документа.")
+            return
+        key, expected_imito, expected_hash = cache
+        try:
+            with open(d.stored_path, "rb") as f:
+                data = f.read()
+            actual_imito = generate_imito(key, data)
+            actual_hash = calc_file_hash(d.stored_path)
+            ok = (actual_imito == expected_imito) and (actual_hash == expected_hash)
+            log_event(self.current_user or "system", "imito_verify", "ok" if ok else "fail", doc_id=d.doc_id, extra={
+                "expected_imito": expected_imito,
+                "actual_imito": actual_imito,
+                "expected_hash": expected_hash,
+                "actual_hash": actual_hash,
+            })
+            if ok:
+                messagebox.showinfo("Имитовставка", "Код совпадает, целостность подтверждена.")
+                self.set_status("Имитовставка подтверждена")
+            else:
+                messagebox.showwarning("Имитовставка", "Несовпадение кода или хэша: файл был изменён.")
+                self.set_status("Имитовставка не прошла проверку")
+            self.refresh_audit()
+        except Exception as e:
+            messagebox.showerror("Ошибка", str(e))
+
+    def encrypt_mgm_now(self):
+        if not self.require_user():
+            return
+        d = self.get_doc()
+        if not d:
+            messagebox.showwarning("Нет документа", "Выберите документ.")
+            return
+        ad = simpledialog.askstring("Связанные данные", "Введите связанный текст (AАD) для MGM", initialvalue=d.doc_id or "")
+        if ad is None:
+            return
+        try:
+            enc_path = encrypt_file_mgm(self.current_user, d.stored_path, associated_data=ad.encode("utf-8"))
+            self._mgm_paths[d.doc_id] = enc_path
+            messagebox.showinfo("MGM", f"Файл зашифрован (MGM):\n{enc_path}\nAАD: {ad}")
+            self.set_status("MGM шифрование выполнено")
+            self.refresh_audit()
+        except Exception as e:
+            messagebox.showerror("Ошибка", str(e))
+
+    def decrypt_mgm_now(self):
+        if not self.require_user():
+            return
+        d = self.get_doc()
+        if not d:
+            messagebox.showwarning("Нет документа", "Выберите документ.")
+            return
+        enc_path = self._mgm_paths.get(d.doc_id)
+        if not enc_path or not os.path.isfile(enc_path):
+            enc_path = filedialog.askopenfilename(
+                title="Выберите MGM пакет", initialdir=os.getcwd(), filetypes=[("MGM пакеты", "*.mgm.json"), ("JSON", "*.json"), ("Все", "*.*")]
+            )
+        if not enc_path:
+            return
+        ad = simpledialog.askstring("Связанные данные", "Введите связанный текст (AАD) для MGM", initialvalue=d.doc_id or "")
+        if ad is None:
+            return
+        try:
+            dec_path = decrypt_file_mgm(self.current_user, enc_path, associated_data=ad.encode("utf-8"))
+            messagebox.showinfo("MGM", f"Файл расшифрован: {dec_path}\nAАD: {ad}")
+            self.set_status("MGM расшифровка выполнена")
+            self.refresh_audit()
+        except Exception as e:
+            messagebox.showerror("Ошибка", str(e))
+
+    def demo_dh_elgamal(self):
+        d = self.get_doc()
+        if not d:
+            messagebox.showwarning("Нет документа", "Выберите документ.")
+            return
+        try:
+            alice = dh_generate_keypair()
+            bob = dh_generate_keypair()
+            shared_a = dh_derive_shared_secret(alice["private"], bob["public"], alice["p"])
+            shared_b = dh_derive_shared_secret(bob["private"], alice["public"], alice["p"])
+            if shared_a != shared_b:
+                raise ValueError("DH секреты не совпадают")
+
+            with open(d.stored_path, "rb") as f:
+                payload = f.read()
+            signature = elgamal_sign(payload, alice["private"], alice["p"], alice["g"])
+            verified = elgamal_verify(payload, signature, alice["public"], alice["p"], alice["g"])
+
+            log_event(self.current_user or "system", "elgamal_demo", "ok" if verified else "fail", doc_id=d.doc_id, extra={
+                "dh_shared": shared_a.hex(),
+                "signature": signature,
+            })
+            if verified:
+                messagebox.showinfo("DH / ElGamal", "DH секрета совпали, подпись ElGamal успешно проверена.")
+                self.set_status("DH/ElGamal проверка пройдена")
+            else:
+                messagebox.showwarning("DH / ElGamal", "Подпись ElGamal не подтвердилась.")
+                self.set_status("DH/ElGamal проверка не пройдена")
             self.refresh_audit()
         except Exception as e:
             messagebox.showerror("Ошибка", str(e))
