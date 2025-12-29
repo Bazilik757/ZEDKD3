@@ -191,7 +191,7 @@ def xor_cipher(data: bytes, key: bytes) -> bytes:
 def generate_imito(key: bytes, data: bytes, size: int = 16) -> str:
     """Compute an imitovstavka (MAC) for integrity control."""
 
-    mac = hmac.new(key, data, hashlib.blake2b, digest_size=size)
+    mac = hashlib.blake2b(data, key=key, digest_size=size)
     return mac.hexdigest()
 
 
